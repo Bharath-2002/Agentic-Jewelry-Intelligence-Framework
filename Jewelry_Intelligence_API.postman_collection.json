@@ -1,0 +1,305 @@
+{
+  "info": {
+    "name": "Jewelry Intelligence API",
+    "_postman_id": "jewelry-intelligence-api",
+    "description": "Complete API collection for Agentic Jewelry Intelligence Framework",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Check if the API is running"
+      }
+    },
+    {
+      "name": "API Root",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/",
+          "host": ["{{base_url}}"],
+          "path": [""]
+        },
+        "description": "Get API information"
+      }
+    },
+    {
+      "name": "Create Scraping Job",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "var jsonData = pm.response.json();",
+              "pm.environment.set(\"job_id\", jsonData.job_id);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://www.example-jewelry-site.com\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/scrape",
+          "host": ["{{base_url}}"],
+          "path": ["scrape"]
+        },
+        "description": "Start a new scraping job. Job ID will be saved automatically."
+      }
+    },
+    {
+      "name": "Check Job Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/status/{{job_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["status", "{{job_id}}"]
+        },
+        "description": "Check the status of a scraping job"
+      }
+    },
+    {
+      "name": "List All Jewels",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?limit=10&offset=0",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "offset",
+              "value": "0"
+            }
+          ]
+        },
+        "description": "Get all jewelry products with pagination"
+      }
+    },
+    {
+      "name": "Filter by Vibe - Wedding",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?vibe=wedding&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "vibe",
+              "value": "wedding"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by wedding vibe"
+      }
+    },
+    {
+      "name": "Filter by Vibe - Engagement",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?vibe=engagement&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "vibe",
+              "value": "engagement"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by engagement vibe"
+      }
+    },
+    {
+      "name": "Filter by Metal - Gold",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?metal=gold&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "metal",
+              "value": "gold"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by gold metal"
+      }
+    },
+    {
+      "name": "Filter by Metal - Platinum",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?metal=platinum&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "metal",
+              "value": "platinum"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by platinum metal"
+      }
+    },
+    {
+      "name": "Filter by Type - Ring",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?jewel_type=ring&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "jewel_type",
+              "value": "ring"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by ring type"
+      }
+    },
+    {
+      "name": "Filter by Type - Necklace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?jewel_type=necklace&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "jewel_type",
+              "value": "necklace"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Filter jewelry by necklace type"
+      }
+    },
+    {
+      "name": "Combined Filter - Engagement Platinum Ring",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels?vibe=engagement&metal=platinum&jewel_type=ring&limit=10",
+          "host": ["{{base_url}}"],
+          "path": ["jewels"],
+          "query": [
+            {
+              "key": "vibe",
+              "value": "engagement"
+            },
+            {
+              "key": "metal",
+              "value": "platinum"
+            },
+            {
+              "key": "jewel_type",
+              "value": "ring"
+            },
+            {
+              "key": "limit",
+              "value": "10"
+            }
+          ]
+        },
+        "description": "Filter with multiple criteria"
+      }
+    },
+    {
+      "name": "Get Single Jewel by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/jewels/{{jewel_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["jewels", "{{jewel_id}}"]
+        },
+        "description": "Get details of a single jewelry item. Replace {{jewel_id}} with actual ID."
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "job_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "jewel_id",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
