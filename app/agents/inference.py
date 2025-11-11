@@ -16,7 +16,7 @@ class InferenceAgent:
         self.settings = settings
         self.client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
 
-    async def infer_attributes(self, images: List[str], extracted_data: Dict) -> Dict[str, Any]:
+    async def infer_attributes(self, images: List[str], extracted_data: Dict) -> Optional[Dict[str, Any]]:
         """
         Infer visual attributes from product images using AI.
 
@@ -25,7 +25,7 @@ class InferenceAgent:
             extracted_data: Previously extracted data for context
 
         Returns:
-            Dictionary with inferred attributes
+            Dictionary with inferred attributes, or None if product should be skipped
         """
         if not self.client or not images:
             logger.warning("No OpenAI client or images available for inference")
@@ -70,6 +70,11 @@ class InferenceAgent:
             result_text = response.choices[0].message.content
             inferred = self._parse_inference_result(result_text)
 
+            # Check if this is a valid specific product
+            if inferred and inferred.get("is_valid_product") == False:
+                logger.info(f"Product validation failed: {inferred.get('skip_reason', 'Generic product name')}")
+                return None
+
             logger.info(f"Successfully inferred attributes: {inferred}")
             return inferred
 
@@ -81,14 +86,29 @@ class InferenceAgent:
         """Create a prompt for the vision model."""
         product_name = extracted_data.get("name", "this jewelry item")
 
-        prompt = f"""Analyze this jewelry image for "{product_name}" and provide the following information in a structured format:
+        prompt = f"""First, validate if this is a SPECIFIC jewelry product by checking the product name: "{product_name}"
 
-1. Jewelry Type: Identify the type (ring, necklace, earring, bracelet, etc.)
-2. Gemstone: Identify the primary gemstone if visible (diamond, ruby, sapphire, emerald, pearl, etc.)
-3. Gemstone Color: Describe the gemstone color (white, blue, red, green, etc.)
-4. Metal Color: Identify the metal color (yellow gold, white gold, rose gold, silver, platinum, etc.)
+IMPORTANT - Product Name Validation:
+- If the product name contains generic category terms like "all jewelry", "chains", "rings", "necklaces", "bracelets", "earrings", "collection", "shop all", "view all", etc., mark as INVALID
+- Only SPECIFIC product names with unique identifiers, model numbers, or descriptive details should be marked as VALID
+- Examples of INVALID names: "All Jewelry", "Shop Chains", "View All Rings", "Necklace Collection"
+- Examples of VALID names: "Diamond Solitaire Ring 14K", "Vintage Pearl Necklace #12345", "Rose Gold Band with Sapphires"
+
+If the product name is INVALID (too generic), respond with EXACTLY:
+Valid Product: No
+Skip Reason: Generic category name, not a specific product
+
+If the product name is VALID (specific product), analyze this jewelry image and provide the following information:
+
+1. Valid Product: Yes
+2. Jewelry Type: Identify the type (ring, necklace, earring, bracelet, etc.)
+3. Gemstone: Identify the primary gemstone if visible (diamond, ruby, sapphire, emerald, pearl, etc.)
+4. Gemstone Color: Describe the gemstone color (white, blue, red, green, etc.)
+5. Metal Color: Identify the metal color (yellow gold, white gold, rose gold, silver, platinum, etc.)
 
 Please respond in this exact format:
+Valid Product: [Yes or No]
+Skip Reason: [reason if No, otherwise omit this line]
 Jewelry Type: [type]
 Gemstone: [gemstone or "none visible"]
 Gemstone Color: [color or "n/a"]
@@ -101,6 +121,8 @@ Be specific and concise."""
     def _parse_inference_result(self, result_text: str) -> Dict[str, Any]:
         """Parse the AI response into structured data."""
         inferred = {
+            "is_valid_product": True,
+            "skip_reason": None,
             "jewelry_type": None,
             "gemstone": None,
             "gemstone_color": None,
@@ -114,20 +136,33 @@ Be specific and concise."""
                 if ':' in line:
                     key, value = line.split(':', 1)
                     key = key.strip().lower()
-                    value = value.strip().lower()
+                    value = value.strip()
 
-                    if value and value not in ["none visible", "n/a", "none", "unknown"]:
-                        if "jewelry type" in key or "type" in key:
-                            inferred["jewelry_type"] = value
+                    # Check for product validation
+                    if "valid product" in key:
+                        value_lower = value.lower()
+                        if "no" in value_lower:
+                            inferred["is_valid_product"] = False
+                        continue
+
+                    # Check for skip reason
+                    if "skip reason" in key:
+                        inferred["skip_reason"] = value
+                        continue
+
+                    value_lower = value.lower()
+                    if value_lower and value_lower not in ["none visible", "n/a", "none", "unknown"]:
+                        if "jewelry type" in key or ("type" in key and "valid" not in key):
+                            inferred["jewelry_type"] = value_lower
                             inferred["confidence"]["jewelry_type"] = 0.85
                         elif "gemstone" in key and "color" not in key:
-                            inferred["gemstone"] = value
+                            inferred["gemstone"] = value_lower
                             inferred["confidence"]["gemstone"] = 0.80
                         elif "gemstone color" in key or "stone color" in key:
-                            inferred["gemstone_color"] = value
+                            inferred["gemstone_color"] = value_lower
                             inferred["confidence"]["gemstone_color"] = 0.75
-                        elif "metal color" in key or "metal" in key:
-                            inferred["metal_color"] = value
+                        elif "metal color" in key or ("metal" in key and "color" not in key):
+                            inferred["metal_color"] = value_lower
                             inferred["confidence"]["metal_color"] = 0.85
 
         except Exception as e:

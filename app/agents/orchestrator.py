@@ -4,7 +4,7 @@ from typing import Optional
 from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models.job import Job, JobStatus
-from app.agents.crawler import CrawlerAgent
+from app.agents.crawler import IntelligentCrawler
 from app.agents.extractor import ExtractorAgent
 from app.agents.normalizer import NormalizerAgent
 from app.agents.inference import InferenceAgent
@@ -59,7 +59,7 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
             }
 
             # Initialize agents
-            crawler = CrawlerAgent()
+            crawler = IntelligentCrawler(settings)
             extractor = ExtractorAgent()
             normalizer = NormalizerAgent()
             inference = InferenceAgent()
@@ -77,17 +77,24 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
             # Apply product limit for cost control (DEV/TESTING ONLY)
             # For production, set MAX_PRODUCTS_TO_PROCESS=0 or None in .env
             max_products = settings.max_products_to_process
-            if max_products and max_products > 0 and len(products) > max_products:
-                logger.warning(
-                    f"⚠️  COST CONTROL: Limiting processing to {max_products} products "
-                    f"(found {len(products)}). Set MAX_PRODUCTS_TO_PROCESS=0 in .env to disable this limit."
+            if max_products and max_products > 0:
+                logger.info(
+                    f"ℹ️  COST CONTROL: Will stop after storing {max_products} products in database. "
+                    f"Set MAX_PRODUCTS_TO_PROCESS=0 in .env to disable this limit."
                 )
-                products = products[:max_products]
-                stats["products_found"] = len(products)
 
             # Process each product through the pipeline
             for idx, product_data in enumerate(products):
                 try:
+                    # Check if we've reached the max products limit (based on stored count)
+                    if max_products and max_products > 0 and stats["products_stored"] >= max_products:
+                        logger.warning(
+                            f"⚠️  COST CONTROL: Reached limit of {max_products} products stored in database. "
+                            f"Stopping processing. Found {len(products)} total products, "
+                            f"processed {idx} products, stored {stats['products_stored']} products."
+                        )
+                        break
+
                     product_url = product_data.get("url")
                     logger.info(f"Processing product {idx + 1}/{len(products)}: {product_url}")
 
@@ -103,6 +110,11 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
                     logger.info("  Step 4: Inferring visual attributes...")
                     images = product_data.get("images", [])
                     inferred_data = await inference.infer_attributes(images, extracted_data)
+
+                    # Check if product should be skipped (returns None if invalid)
+                    if inferred_data is None:
+                        logger.info(f"  ⊘ Skipped (not a specific product): {product_url}")
+                        continue
 
                     # Step 5: Generate summary and vibe
                     logger.info("  Step 5: Generating summary and vibe...")
