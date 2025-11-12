@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, distinct
 from app.database import get_db
 from app.models.jewel import Jewel
+from app.schemas.jewel import FilterOptionsResponse, PriceRange
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/filters")
+@router.get("/filters", response_model=FilterOptionsResponse)
 async def get_filter_options(
     db: AsyncSession = Depends(get_db)
-) -> Dict[str, List[str]]:
+) -> FilterOptionsResponse:
     """
     Get all unique filter values for jewel attributes.
 
@@ -114,37 +115,37 @@ async def get_filter_options(
 
         logger.info(f"Retrieved filter options: {total_count} total jewels")
 
-        return {
-            "jewel_types": jewel_types,
-            "metals": metals,
-            "gemstones": gemstones,
-            "gemstone_colors": gemstone_colors,
-            "metal_colors": metal_colors,
-            "vibes": vibes,
-            "colors": colors,
-            "currencies": currencies,
-            "price_range": {
-                "min": float(min_price) if min_price else None,
-                "max": float(max_price) if max_price else None
-            },
-            "total_count": total_count
-        }
+        return FilterOptionsResponse(
+            jewel_types=jewel_types,
+            metals=metals,
+            gemstones=gemstones,
+            gemstone_colors=gemstone_colors,
+            metal_colors=metal_colors,
+            vibes=vibes,
+            colors=colors,
+            currencies=currencies,
+            price_range=PriceRange(
+                min=float(min_price) if min_price else None,
+                max=float(max_price) if max_price else None
+            ),
+            total_count=total_count
+        )
 
     except Exception as e:
         logger.error(f"Error retrieving filter options: {str(e)}")
         # Return empty filters on error
-        return {
-            "jewel_types": [],
-            "metals": [],
-            "gemstones": [],
-            "gemstone_colors": [],
-            "metal_colors": [],
-            "vibes": [],
-            "colors": [],
-            "currencies": [],
-            "price_range": {"min": None, "max": None},
-            "total_count": 0
-        }
+        return FilterOptionsResponse(
+            jewel_types=[],
+            metals=[],
+            gemstones=[],
+            gemstone_colors=[],
+            metal_colors=[],
+            vibes=[],
+            colors=[],
+            currencies=[],
+            price_range=PriceRange(min=None, max=None),
+            total_count=0
+        )
 
 
 @router.get("/filters/counts")

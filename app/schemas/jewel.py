@@ -34,3 +34,23 @@ class JewelListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class PriceRange(BaseModel):
+    """Schema for price range."""
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+
+class FilterOptionsResponse(BaseModel):
+    """Schema for filter options response."""
+    jewel_types: List[str] = Field(default_factory=list)
+    metals: List[str] = Field(default_factory=list)
+    gemstones: List[str] = Field(default_factory=list)
+    gemstone_colors: List[str] = Field(default_factory=list)
+    metal_colors: List[str] = Field(default_factory=list)
+    vibes: List[str] = Field(default_factory=list)
+    colors: List[str] = Field(default_factory=list)
+    currencies: List[str] = Field(default_factory=list)
+    price_range: PriceRange
+    total_count: int

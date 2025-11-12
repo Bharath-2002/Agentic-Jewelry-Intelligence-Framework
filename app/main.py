@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 from app.api import api_router
 from app.database import init_db, close_db
 from app.config import get_settings
@@ -45,6 +47,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static files for images
+image_storage_path = Path(settings.image_storage_path)
+image_storage_path.mkdir(parents=True, exist_ok=True)
+app.mount("/images", StaticFiles(directory=str(image_storage_path)), name="images")
 
 # Include API routes
 app.include_router(api_router)
