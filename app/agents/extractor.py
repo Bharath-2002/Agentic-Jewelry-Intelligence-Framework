@@ -70,50 +70,131 @@ class ExtractorAgent:
         return "Unknown Product"
 
     def _extract_price(self, soup: BeautifulSoup) -> Dict[str, Optional[Any]]:
-        """Extract price information."""
-        price_data = {"amount": None, "currency": None}
+        """Extract price information including sale and original prices."""
+        price_data = {
+            "amount": None,
+            "currency": None,
+            "original_price": None,
+            "sale_price": None
+        }
 
-        # Try Schema.org
-        price_elem = soup.find(attrs={"itemprop": "price"})
-        if price_elem:
-            price_data["amount"] = self._parse_price_amount(price_elem.get("content") or price_elem.get_text())
+        # First, try to find the main price container
+        price_container = None
+        price_container_selectors = [
+            soup.find(class_=re.compile(r"product[_-]price|price[_-]wrapper", re.I)),
+            soup.find("div", class_=re.compile(r"price", re.I)),
+            soup.find("span", class_=re.compile(r"price", re.I)),
+        ]
 
-        # Try common price classes
+        for elem in price_container_selectors:
+            if elem:
+                price_container = elem
+                break
+
+        if price_container:
+            # Extract sale price (look for <ins> tags or sale-related classes)
+            sale_elem = (
+                price_container.find("ins") or
+                price_container.find(class_=re.compile(r"sale[_-]price|discount[_-]price|special[_-]price", re.I)) or
+                price_container.find("span", class_=re.compile(r"sale|discount|special", re.I))
+            )
+
+            if sale_elem:
+                sale_text = sale_elem.get_text()
+                price_data["sale_price"] = self._parse_price_amount(sale_text)
+                if not price_data["currency"]:
+                    price_data["currency"] = self._extract_currency(sale_text)
+
+            # Extract original/MRP price (look for <del> tags or mrp/original-related classes)
+            original_elem = (
+                price_container.find("del") or
+                price_container.find(class_=re.compile(r"mrp|original[_-]price|regular[_-]price|was[_-]price", re.I)) or
+                price_container.find("span", class_=re.compile(r"mrp|original|regular", re.I))
+            )
+
+            if original_elem:
+                original_text = original_elem.get_text()
+                price_data["original_price"] = self._parse_price_amount(original_text)
+                if not price_data["currency"]:
+                    price_data["currency"] = self._extract_currency(original_text)
+
+            # Set the main amount (prefer sale price if available)
+            price_data["amount"] = price_data["sale_price"] or price_data["original_price"]
+
+        # Fallback: Try Schema.org
         if not price_data["amount"]:
-            price_selectors = [
-                soup.find(class_=re.compile(r"price|cost|amount", re.I)),
-                soup.find("span", class_=re.compile(r"price", re.I)),
-                soup.find("div", class_=re.compile(r"price", re.I)),
-            ]
+            price_elem = soup.find(attrs={"itemprop": "price"})
+            if price_elem:
+                price_data["amount"] = self._parse_price_amount(price_elem.get("content") or price_elem.get_text())
 
-            for elem in price_selectors:
-                if elem:
-                    price_text = elem.get_text()
-                    price_data["amount"] = self._parse_price_amount(price_text)
-                    price_data["currency"] = self._extract_currency(price_text)
-                    if price_data["amount"]:
-                        break
+        # Fallback: Try to extract from any price element
+        if not price_data["amount"]:
+            price_elem = soup.find(class_=re.compile(r"price|cost|amount", re.I))
+            if price_elem:
+                # Find the first span/div with money class or direct text
+                money_elem = price_elem.find(class_=re.compile(r"money", re.I))
+                if money_elem:
+                    price_text = money_elem.get_text()
+                else:
+                    price_text = price_elem.get_text()
+
+                price_data["amount"] = self._parse_price_amount(price_text)
+                price_data["currency"] = self._extract_currency(price_text)
 
         # Try to get currency from schema
-        currency_elem = soup.find(attrs={"itemprop": "priceCurrency"})
-        if currency_elem and not price_data["currency"]:
-            price_data["currency"] = currency_elem.get("content") or currency_elem.get_text()
+        if not price_data["currency"]:
+            currency_elem = soup.find(attrs={"itemprop": "priceCurrency"})
+            if currency_elem:
+                price_data["currency"] = currency_elem.get("content") or currency_elem.get_text()
 
         return price_data
 
     def _parse_price_amount(self, price_str: str) -> Optional[float]:
-        """Parse price amount from string."""
+        """Parse price amount from string, extracting the first valid number."""
         if not price_str:
             return None
 
         try:
-            # Remove currency symbols and text
+            # Remove extra whitespace
+            price_str = price_str.strip()
+
+            # Look for number patterns (handles formats like: 1,234.56 or 1234.56 or 1.234,56)
+            # Match patterns: optional digits with comma/dot separators
+            patterns = [
+                r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # US format: 1,234.56
+                r'(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)',  # EU format: 1.234,56
+                r'(\d+(?:\.\d{2})?)',                  # Simple: 1234.56
+                r'(\d+(?:,\d{2})?)',                   # Simple with comma: 1234,56
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, price_str)
+                if match:
+                    cleaned = match.group(1)
+                    # Determine if comma is decimal separator or thousands separator
+                    if ',' in cleaned and '.' in cleaned:
+                        # Both present: assume comma is thousands separator (US format)
+                        cleaned = cleaned.replace(',', '')
+                    elif ',' in cleaned and cleaned.count(',') == 1 and len(cleaned.split(',')[1]) == 2:
+                        # Single comma with 2 digits after: decimal separator (EU format)
+                        cleaned = cleaned.replace(',', '.')
+                    elif ',' in cleaned:
+                        # Multiple commas or other: thousands separator
+                        cleaned = cleaned.replace(',', '')
+
+                    return float(cleaned)
+
+            # Fallback: remove all non-numeric except first dot/comma
             cleaned = re.sub(r'[^\d.,]', '', price_str)
-            # Handle different decimal separators
             cleaned = cleaned.replace(',', '')
-            return float(cleaned)
-        except:
+            if cleaned:
+                return float(cleaned)
+
+        except Exception as e:
+            logger.debug(f"Failed to parse price: {price_str}, error: {e}")
             return None
+
+        return None
 
     def _extract_currency(self, text: str) -> Optional[str]:
         """Extract currency from text."""

@@ -83,8 +83,10 @@ class InferenceAgent:
             return self._fallback_inference(extracted_data)
 
     def _create_inference_prompt(self, extracted_data: Dict) -> str:
-        """Create a prompt for the vision model."""
+        """Create a prompt for the vision model that combines inference and summarization."""
         product_name = extracted_data.get("name", "this jewelry item")
+        metal = extracted_data.get("metal", "")
+        price = extracted_data.get("price_amount", "")
 
         prompt = f"""First, validate if this is a SPECIFIC jewelry product by checking the product name: "{product_name}"
 
@@ -98,13 +100,21 @@ If the product name is INVALID (too generic), respond with EXACTLY:
 Valid Product: No
 Skip Reason: Generic category name, not a specific product
 
-If the product name is VALID (specific product), analyze this jewelry image and provide the following information:
+If the product name is VALID (specific product), analyze this jewelry image and provide ALL of the following information:
 
+Product Information:
+- Name: {product_name}
+- Metal: {metal if metal else 'unknown'}
+- Price: {price if price else 'unknown'}
+
+Please provide:
 1. Valid Product: Yes
 2. Jewelry Type: Identify the type (ring, necklace, earring, bracelet, etc.)
 3. Gemstone: Identify the primary gemstone if visible (diamond, ruby, sapphire, emerald, pearl, etc.)
 4. Gemstone Color: Describe the gemstone color (white, blue, red, green, etc.)
 5. Metal Color: Identify the metal color (yellow gold, white gold, rose gold, silver, platinum, etc.)
+6. Summary: A concise 1-2 sentence product summary that highlights the key features and appeal
+7. Vibe: Classification from ONE of: wedding, engagement, casual, festive, formal, date-night, everyday, party
 
 Please respond in this exact format:
 Valid Product: [Yes or No]
@@ -113,13 +123,15 @@ Jewelry Type: [type]
 Gemstone: [gemstone or "none visible"]
 Gemstone Color: [color or "n/a"]
 Metal Color: [color]
+Summary: [1-2 sentence summary]
+Vibe: [single vibe word]
 
 Be specific and concise."""
 
         return prompt
 
     def _parse_inference_result(self, result_text: str) -> Dict[str, Any]:
-        """Parse the AI response into structured data."""
+        """Parse the AI response into structured data including summary and vibe."""
         inferred = {
             "is_valid_product": True,
             "skip_reason": None,
@@ -127,6 +139,8 @@ Be specific and concise."""
             "gemstone": None,
             "gemstone_color": None,
             "metal_color": None,
+            "summary": None,
+            "vibe": "casual",
             "confidence": {}
         }
 
@@ -150,9 +164,25 @@ Be specific and concise."""
                         inferred["skip_reason"] = value
                         continue
 
+                    # Check for summary
+                    if "summary" in key:
+                        inferred["summary"] = value
+                        continue
+
+                    # Check for vibe
+                    if "vibe" in key:
+                        vibe_words = ["wedding", "engagement", "casual", "festive",
+                                     "formal", "date-night", "everyday", "party"]
+                        value_lower = value.lower()
+                        for vibe in vibe_words:
+                            if vibe in value_lower:
+                                inferred["vibe"] = vibe
+                                break
+                        continue
+
                     value_lower = value.lower()
                     if value_lower and value_lower not in ["none visible", "n/a", "none", "unknown"]:
-                        if "jewelry type" in key or ("type" in key and "valid" not in key):
+                        if "jewelry type" in key or ("type" in key and "valid" not in key and "vibe" not in key):
                             inferred["jewelry_type"] = value_lower
                             inferred["confidence"]["jewelry_type"] = 0.85
                         elif "gemstone" in key and "color" not in key:
@@ -178,13 +208,15 @@ Be specific and concise."""
             extracted_data: Extracted data to use for inference
 
         Returns:
-            Dictionary with inferred attributes
+            Dictionary with inferred attributes including summary and vibe
         """
         inferred = {
             "jewelry_type": extracted_data.get("jewel_type"),
             "gemstone": extracted_data.get("gemstone"),
             "gemstone_color": None,
             "metal_color": None,
+            "summary": None,
+            "vibe": "casual",
             "confidence": {}
         }
 
@@ -219,9 +251,50 @@ Be specific and concise."""
             }
             inferred["gemstone_color"] = gemstone_colors.get(gemstone_lower)
 
+        # Generate simple summary
+        name = extracted_data.get("name", "jewelry piece")
+        jewel_type = inferred.get("jewelry_type", "jewelry")
+        parts = []
+        if jewel_type:
+            parts.append(f"A beautiful {jewel_type}")
+        else:
+            parts.append("A beautiful jewelry piece")
+        if metal:
+            parts.append(f"crafted in {metal}")
+        if gemstone:
+            parts.append(f"featuring {gemstone}")
+        inferred["summary"] = " ".join(parts) + "."
+
+        # Determine vibe using rule-based approach
+        name_lower = name.lower()
+        jewel_type_lower = (jewel_type or "").lower()
+        gemstone_lower = (gemstone or "").lower()
+
+        # Wedding/Engagement indicators
+        if any(word in name_lower for word in ["wedding", "bridal", "engagement"]):
+            inferred["vibe"] = "wedding" if "wedding" in name_lower else "engagement"
+        # Ring with diamond is likely engagement
+        elif jewel_type_lower == "ring" and "diamond" in gemstone_lower:
+            inferred["vibe"] = "engagement"
+        # Festive indicators
+        elif any(word in name_lower for word in ["festive", "celebration", "festival"]):
+            inferred["vibe"] = "festive"
+        # Formal indicators
+        elif any(word in name_lower for word in ["formal", "gala", "elegant", "luxury"]):
+            inferred["vibe"] = "formal"
+        # Party indicators
+        elif any(word in name_lower for word in ["party", "cocktail", "evening"]):
+            inferred["vibe"] = "party"
+        # Date night indicators
+        elif any(word in name_lower for word in ["romantic", "date", "evening"]):
+            inferred["vibe"] = "date-night"
+        # Everyday/casual as default
+        elif any(word in name_lower for word in ["everyday", "daily", "simple", "minimalist"]):
+            inferred["vibe"] = "everyday"
+
         # Set lower confidence for fallback
         for key in inferred:
-            if key != "confidence" and inferred[key]:
+            if key != "confidence" and key not in ["summary", "vibe"] and inferred[key]:
                 inferred["confidence"][key] = 0.50
 
         logger.info("Using fallback inference (rule-based)")

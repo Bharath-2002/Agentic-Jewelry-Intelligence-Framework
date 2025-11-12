@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import select
@@ -8,7 +9,6 @@ from app.agents.crawler import IntelligentCrawler
 from app.agents.extractor import ExtractorAgent
 from app.agents.normalizer import NormalizerAgent
 from app.agents.inference import InferenceAgent
-from app.agents.summarizer import SummarizerAgent
 from app.agents.storage import StorageAgent
 from app.utils.email import send_job_notification
 from app.config import get_settings
@@ -27,11 +27,15 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
 
     This function runs as a background task and coordinates:
     1. Crawler Agent - discovers and scrapes product pages
-    2. Extractor Agent - extracts metadata from HTML
-    3. Normalizer Agent - normalizes data to canonical format
-    4. Inference Agent - infers visual attributes using AI
-    5. Summarizer Agent - generates summaries and vibes
-    6. Storage Agent - stores data with deduplication
+    2-6. Product Pipeline (concurrent processing):
+        - Extractor Agent - extracts metadata from HTML
+        - Normalizer Agent - normalizes data to canonical format
+        - Inference Agent - infers visual attributes, summary, and vibes using AI (combined)
+        - Storage Agent - stores data with deduplication
+
+    Performance optimizations:
+    - Combined AI inference for attributes + summary/vibe (1 LLM call instead of 2)
+    - Concurrent processing of multiple products (default: 3 products in parallel)
     """
     async with AsyncSessionLocal() as db:
         try:
@@ -63,7 +67,6 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
             extractor = ExtractorAgent()
             normalizer = NormalizerAgent()
             inference = InferenceAgent()
-            summarizer = SummarizerAgent()
             storage = StorageAgent()
 
             # Step 1: Crawl website for products
@@ -83,68 +86,95 @@ async def run_scraping_pipeline(job_id: str, url: str) -> None:
                     f"Set MAX_PRODUCTS_TO_PROCESS=0 in .env to disable this limit."
                 )
 
-            # Process each product through the pipeline
-            for idx, product_data in enumerate(products):
-                try:
-                    # Check if we've reached the max products limit (based on stored count)
-                    if max_products and max_products > 0 and stats["products_stored"] >= max_products:
-                        logger.warning(
-                            f"⚠️  COST CONTROL: Reached limit of {max_products} products stored in database. "
-                            f"Stopping processing. Found {len(products)} total products, "
-                            f"processed {idx} products, stored {stats['products_stored']} products."
+            # Configure concurrent processing
+            max_concurrent_products = getattr(settings, 'max_concurrent_products', 3)
+            logger.info(f"⚡ Processing {max_concurrent_products} products concurrently")
+
+            # Semaphore to limit concurrent processing
+            semaphore = asyncio.Semaphore(max_concurrent_products)
+            lock = asyncio.Lock()
+
+            # Worker function to process a single product
+            async def process_product(idx: int, product_data: dict):
+                """Process a single product through the pipeline."""
+                async with semaphore:
+                    # Check max products limit (thread-safe)
+                    async with lock:
+                        if max_products and max_products > 0 and stats["products_stored"] >= max_products:
+                            return None
+
+                    try:
+                        product_url = product_data.get("url")
+                        logger.info(f"Processing product {idx + 1}/{len(products)}: {product_url}")
+
+                        # Step 2: Extract metadata
+                        logger.info(f"  [{idx + 1}] Step 2: Extracting metadata...")
+                        extracted_data = extractor.extract(product_data)
+
+                        # Step 3: Normalize data
+                        logger.info(f"  [{idx + 1}] Step 3: Normalizing data...")
+                        normalized_data = normalizer.normalize(extracted_data)
+
+                        # Step 4 & 5 (Combined): Infer visual attributes + Generate summary/vibe with AI
+                        logger.info(f"  [{idx + 1}] Step 4-5: Inferring attributes and generating summary...")
+                        images = product_data.get("images", [])
+                        inferred_data = await inference.infer_attributes(images, extracted_data)
+
+                        # Check if product should be skipped (returns None if invalid)
+                        if inferred_data is None:
+                            logger.info(f"  [{idx + 1}] ⊘ Skipped (not a specific product): {product_url}")
+                            return None
+
+                        # Extract summary and vibe from inferred_data (now included in inference response)
+                        summary_data = {
+                            "summary": inferred_data.get("summary"),
+                            "vibe": inferred_data.get("vibe")
+                        }
+
+                        # Step 6: Store in database
+                        logger.info(f"  [{idx + 1}] Step 6: Storing in database...")
+                        jewel = await storage.store_jewel(
+                            db=db,
+                            source_url=product_url,
+                            images=images,
+                            normalized_data=normalized_data,
+                            inferred_data=inferred_data,
+                            summary_data=summary_data
                         )
-                        break
 
-                    product_url = product_data.get("url")
-                    logger.info(f"Processing product {idx + 1}/{len(products)}: {product_url}")
+                        if jewel:
+                            async with lock:
+                                stats["products_stored"] += 1
+                                stats["images_downloaded"] += len(jewel.images or [])
+                            logger.info(f"  [{idx + 1}] ✓ Successfully stored: {jewel.name}")
+                            return jewel
+                        else:
+                            logger.info(f"  [{idx + 1}] ⊘ Skipped (duplicate): {product_url}")
+                            return None
 
-                    # Step 2: Extract metadata
-                    logger.info("  Step 2: Extracting metadata...")
-                    extracted_data = extractor.extract(product_data)
+                    except Exception as e:
+                        logger.error(f"  [{idx + 1}] ✗ Error processing product: {str(e)}")
+                        async with lock:
+                            stats["errors"] += 1
+                        return None
 
-                    # Step 3: Normalize data
-                    logger.info("  Step 3: Normalizing data...")
-                    normalized_data = normalizer.normalize(extracted_data)
-
-                    # Step 4: Infer visual attributes with AI
-                    logger.info("  Step 4: Inferring visual attributes...")
-                    images = product_data.get("images", [])
-                    inferred_data = await inference.infer_attributes(images, extracted_data)
-
-                    # Check if product should be skipped (returns None if invalid)
-                    if inferred_data is None:
-                        logger.info(f"  ⊘ Skipped (not a specific product): {product_url}")
-                        continue
-
-                    # Step 5: Generate summary and vibe
-                    logger.info("  Step 5: Generating summary and vibe...")
-                    summary_data = await summarizer.generate_summary_and_vibe(
-                        normalized_data,
-                        inferred_data
+            # Process products concurrently in batches
+            tasks = []
+            for idx, product_data in enumerate(products):
+                # Check if we've reached the limit before creating more tasks
+                if max_products and max_products > 0 and stats["products_stored"] >= max_products:
+                    logger.warning(
+                        f"⚠️  COST CONTROL: Reached limit of {max_products} products stored in database. "
+                        f"Stopping processing. Found {len(products)} total products, "
+                        f"processed {idx} products, stored {stats['products_stored']} products."
                     )
+                    break
 
-                    # Step 6: Store in database
-                    logger.info("  Step 6: Storing in database...")
-                    jewel = await storage.store_jewel(
-                        db=db,
-                        source_url=product_url,
-                        images=images,
-                        normalized_data=normalized_data,
-                        inferred_data=inferred_data,
-                        summary_data=summary_data
-                    )
+                tasks.append(process_product(idx, product_data))
 
-                    if jewel:
-                        stats["products_stored"] += 1
-                        stats["images_downloaded"] += len(jewel.images or [])
-                        logger.info(f"  ✓ Successfully stored: {jewel.name}")
-                    else:
-                        logger.info(f"  ⊘ Skipped (duplicate): {product_url}")
-
-                except Exception as e:
-                    logger.error(f"  ✗ Error processing product: {str(e)}")
-                    stats["errors"] += 1
-                    continue
+            # Wait for all products to be processed
+            logger.info(f"Processing {len(tasks)} products concurrently...")
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             # Update job status to success
             job.status = JobStatus.SUCCESS
