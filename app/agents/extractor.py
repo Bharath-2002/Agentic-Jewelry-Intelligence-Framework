@@ -78,10 +78,10 @@ class ExtractorAgent:
             "sale_price": None
         }
 
-        # First, try to find the main price container
+        # First, try to find the main price container with more flexible patterns
         price_container = None
         price_container_selectors = [
-            soup.find(class_=re.compile(r"product[_-]price|price[_-]wrapper", re.I)),
+            soup.find(class_=re.compile(r"product[_-]price|price[_-]wrapper|price[_-]widget|price[_-]container|price[_-]box", re.I)),
             soup.find("div", class_=re.compile(r"price", re.I)),
             soup.find("span", class_=re.compile(r"price", re.I)),
         ]
@@ -93,10 +93,11 @@ class ExtractorAgent:
 
         if price_container:
             # Extract sale price (look for <ins> tags or sale-related classes)
+            # Enhanced patterns to include: final, current, selling, offer, now
             sale_elem = (
                 price_container.find("ins") or
-                price_container.find(class_=re.compile(r"sale[_-]price|discount[_-]price|special[_-]price", re.I)) or
-                price_container.find("span", class_=re.compile(r"sale|discount|special", re.I))
+                price_container.find(class_=re.compile(r"sale[_-]?price|discount[_-]?price|special[_-]?price|final[_-]?price|current[_-]?price|selling[_-]?price|offer[_-]?price|now[_-]?price", re.I)) or
+                price_container.find("span", class_=re.compile(r"sale|discount|special|final|current|selling|offer|now", re.I))
             )
 
             if sale_elem:
@@ -105,11 +106,13 @@ class ExtractorAgent:
                 if not price_data["currency"]:
                     price_data["currency"] = self._extract_currency(sale_text)
 
-            # Extract original/MRP price (look for <del> tags or mrp/original-related classes)
+            # Extract original/MRP price (look for <del> tags, strike-through, or mrp-related classes)
+            # Enhanced patterns to include: strike, strikethrough, was, compare
             original_elem = (
                 price_container.find("del") or
-                price_container.find(class_=re.compile(r"mrp|original[_-]price|regular[_-]price|was[_-]price", re.I)) or
-                price_container.find("span", class_=re.compile(r"mrp|original|regular", re.I))
+                price_container.find("s") or
+                price_container.find(class_=re.compile(r"mrp|original[_-]?price|regular[_-]?price|was[_-]?price|strike|compare[_-]?price", re.I)) or
+                price_container.find("span", class_=re.compile(r"mrp|original|regular|strike|was|compare", re.I))
             )
 
             if original_elem:
@@ -141,6 +144,18 @@ class ExtractorAgent:
                 price_data["amount"] = self._parse_price_amount(price_text)
                 price_data["currency"] = self._extract_currency(price_text)
 
+        # Last resort: Extract all numeric values from price-related elements
+        if not price_data["amount"]:
+            all_prices = self._extract_all_prices_fallback(soup)
+            if all_prices:
+                # Use the first valid price found
+                price_data["amount"] = all_prices[0]["amount"]
+                price_data["currency"] = all_prices[0]["currency"]
+                # If we found multiple prices, assume first is sale/final, second is original
+                if len(all_prices) > 1:
+                    price_data["sale_price"] = all_prices[0]["amount"]
+                    price_data["original_price"] = all_prices[1]["amount"]
+
         # Try to get currency from schema
         if not price_data["currency"]:
             currency_elem = soup.find(attrs={"itemprop": "priceCurrency"})
@@ -150,45 +165,82 @@ class ExtractorAgent:
         return price_data
 
     def _parse_price_amount(self, price_str: str) -> Optional[float]:
-        """Parse price amount from string, extracting the first valid number."""
+        """Parse price amount from string, extracting the first valid number.
+
+        Handles various formats:
+        - With spaces: "1 37 606" -> 137606
+        - Indian format: "1,32,222" -> 132222
+        - Western format: "1,234.56" -> 1234.56
+        - EU format: "1.234,56" -> 1234.56
+        """
         if not price_str:
             return None
 
         try:
-            # Remove extra whitespace
+            # Remove extra whitespace and normalize
             price_str = price_str.strip()
 
-            # Look for number patterns (handles formats like: 1,234.56 or 1234.56 or 1.234,56)
-            # Match patterns: optional digits with comma/dot separators
-            patterns = [
-                r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # US format: 1,234.56
-                r'(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)',  # EU format: 1.234,56
-                r'(\d+(?:\.\d{2})?)',                  # Simple: 1234.56
-                r'(\d+(?:,\d{2})?)',                   # Simple with comma: 1234,56
-            ]
+            # First, try to extract just the numeric part with separators
+            # This pattern captures numbers with optional spaces, commas, and dots
+            number_pattern = r'([\d\s.,]+)'
+            match = re.search(number_pattern, price_str)
 
-            for pattern in patterns:
-                match = re.search(pattern, price_str)
-                if match:
-                    cleaned = match.group(1)
-                    # Determine if comma is decimal separator or thousands separator
-                    if ',' in cleaned and '.' in cleaned:
-                        # Both present: assume comma is thousands separator (US format)
-                        cleaned = cleaned.replace(',', '')
-                    elif ',' in cleaned and cleaned.count(',') == 1 and len(cleaned.split(',')[1]) == 2:
-                        # Single comma with 2 digits after: decimal separator (EU format)
-                        cleaned = cleaned.replace(',', '.')
-                    elif ',' in cleaned:
-                        # Multiple commas or other: thousands separator
-                        cleaned = cleaned.replace(',', '')
+            if not match:
+                return None
 
+            cleaned = match.group(1).strip()
+
+            # Remove spaces between digits (handles "1 37 606" -> "137606")
+            cleaned = re.sub(r'\s+', '', cleaned)
+
+            # Now determine the format and parse accordingly
+
+            # Case 1: Both comma and dot present
+            if ',' in cleaned and '.' in cleaned:
+                # Determine which comes last (that's the decimal separator)
+                last_comma_pos = cleaned.rfind(',')
+                last_dot_pos = cleaned.rfind('.')
+
+                if last_dot_pos > last_comma_pos:
+                    # Dot is decimal separator (US/Indian format): 1,234.56
+                    cleaned = cleaned.replace(',', '')
+                else:
+                    # Comma is decimal separator (EU format): 1.234,56
+                    cleaned = cleaned.replace('.', '').replace(',', '.')
+
+                return float(cleaned)
+
+            # Case 2: Only comma present
+            elif ',' in cleaned:
+                # Check if it's decimal separator or thousands separator
+                comma_split = cleaned.split(',')
+
+                # If last part has exactly 2 digits, likely decimal (1234,56)
+                if len(comma_split) == 2 and len(comma_split[1]) == 2:
+                    cleaned = cleaned.replace(',', '.')
+                # Multiple commas or Indian format (1,32,222) - remove all commas
+                else:
+                    cleaned = cleaned.replace(',', '')
+
+                return float(cleaned)
+
+            # Case 3: Only dot present
+            elif '.' in cleaned:
+                # Check if it's decimal separator or thousands separator
+                dot_split = cleaned.split('.')
+
+                # If last part has exactly 2 digits, likely decimal (1234.56)
+                if len(dot_split) == 2 and len(dot_split[1]) == 2:
+                    return float(cleaned)
+                # Multiple dots or EU thousands format - remove all dots
+                else:
+                    cleaned = cleaned.replace('.', '')
                     return float(cleaned)
 
-            # Fallback: remove all non-numeric except first dot/comma
-            cleaned = re.sub(r'[^\d.,]', '', price_str)
-            cleaned = cleaned.replace(',', '')
-            if cleaned:
-                return float(cleaned)
+            # Case 4: No separators, just digits
+            else:
+                if cleaned:
+                    return float(cleaned)
 
         except Exception as e:
             logger.debug(f"Failed to parse price: {price_str}, error: {e}")
@@ -216,6 +268,51 @@ class ExtractorAgent:
             return currency_match.group(1).upper()
 
         return None
+
+    def _extract_all_prices_fallback(self, soup: BeautifulSoup) -> list:
+        """
+        Last resort: Extract all numeric values from any elements with price-related classes.
+        Returns a list of dicts with amount and currency.
+        """
+        prices = []
+
+        # Find all elements with price-related classes
+        price_elements = soup.find_all(class_=re.compile(r"price|cost|amount|money", re.I))
+
+        for elem in price_elements:
+            # Skip elements that contain other price elements (to avoid duplicates)
+            if elem.find(class_=re.compile(r"price|cost|amount|money", re.I)):
+                continue
+
+            text = elem.get_text()
+            amount = self._parse_price_amount(text)
+
+            if amount:
+                currency = self._extract_currency(text)
+                prices.append({
+                    "amount": amount,
+                    "currency": currency
+                })
+
+        # Also try finding elements with specific price-related attributes
+        if not prices:
+            for elem in soup.find_all(["span", "div", "p"], class_=True):
+                classes = elem.get("class", [])
+                class_str = " ".join(classes) if isinstance(classes, list) else classes
+
+                # Check if any class contains price-related keywords
+                if re.search(r"price|cost|amount|money", class_str, re.I):
+                    text = elem.get_text()
+                    amount = self._parse_price_amount(text)
+
+                    if amount:
+                        currency = self._extract_currency(text)
+                        prices.append({
+                            "amount": amount,
+                            "currency": currency
+                        })
+
+        return prices
 
     def _extract_metal(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract metal type."""
