@@ -60,10 +60,16 @@ class IntelligentCrawler:
         self.site_patterns = SitePattern()
         openai_api_key = settings.openai_api_key
         self.openai_client = None
-        
+
+        # Concurrency control
+        self.max_concurrent_pages = getattr(settings, 'crawler_concurrent_pages', 5)
+        self.lock = asyncio.Lock()  # For thread-safe operations on shared state
+
         if openai_api_key:
             self.openai_client = openai.OpenAI(api_key=openai_api_key)
             logger.info("🤖 LLM integration enabled")
+
+        logger.info(f"⚡ Concurrent crawling enabled: {self.max_concurrent_pages} pages in parallel")
         
     async def crawl(self, base_url: str, max_pages: Optional[int] = None) -> List[Dict]:
         """Main crawl orchestration with multiple strategies"""
@@ -124,10 +130,12 @@ class IntelligentCrawler:
                             url = url_tag.get_text().strip()
                             
                             # Check if it's another sitemap
-                            if 'sitemap' in url.lower() and url.endswith('.xml'):
+                            logger.info(f"🗺️  Checking sitemap in for : {url}")
+                            if 'sitemap' in url.lower() and '.xml' in url.lower():
                                 # Recursively check nested sitemap
+                                logger.info(f"🗺️  Checking sitemap inside : {url}")
                                 await self._crawl_nested_sitemap(page, url)
-                            elif self._looks_like_product_url(url):
+                            elif self._looks_like_product_url_sitemap(url):
                                 self.product_urls.add(url)
                                 logger.debug(f"Found product URL in sitemap: {url}")
                         
@@ -153,7 +161,7 @@ class IntelligentCrawler:
                 urls = soup.find_all('loc')
                 for url_tag in urls:
                     url = url_tag.get_text().strip()
-                    if self._looks_like_product_url(url):
+                    if self._looks_like_product_url_sitemap(url):
                         self.product_urls.add(url)
         except Exception as e:
             logger.debug(f"Error crawling nested sitemap {sitemap_url}: {str(e)}")
@@ -326,99 +334,154 @@ Respond in JSON format:
                 self.site_patterns.product_link_selectors.append(selector)
 
     async def _intelligent_crawl(self, browser: Browser, base_url: str, max_pages: int) -> List[Dict]:
-        """Enhanced intelligent crawling with adaptive strategies"""
+        """Enhanced intelligent crawling with concurrent processing"""
         products = []
         domain = urlparse(base_url).netloc
-        
+
         # Initialize queue with discovered categories
         priority_queue = self._initialize_enhanced_priority_queue(base_url)
-        
+
         # Add sitemap products with highest priority
         if self.product_urls:
             for url in list(self.product_urls)[:max_pages]:
                 if url not in self.visited_urls:
                     priority_queue.insert(0, (100, url, PageType.PRODUCT))
-        
-        while priority_queue and len(self.visited_urls) < max_pages:
-            priority, url, expected_type = priority_queue.pop(0)
-            
-            if url in self.visited_urls:
-                continue
-            
-            # Skip obvious non-product pages
-            if self._should_skip_url(url):
-                continue
-                
-            try:
-                logger.info(f"🔍 [{len(self.visited_urls)}/{max_pages}] Crawling: {url} (priority: {priority}, type: {expected_type.value})")
-                self.visited_urls.add(url)
-                
-                page = await browser.new_page(user_agent=self.settings.crawler_user_agent)
-                
+
+        # Create a semaphore to limit concurrent pages
+        semaphore = asyncio.Semaphore(self.max_concurrent_pages)
+
+        # Create worker tasks
+        async def crawl_url(priority: int, url: str, expected_type: PageType):
+            """Worker function to crawl a single URL"""
+            async with semaphore:  # Limit concurrent pages
+                # Check if already visited (thread-safe)
+                async with self.lock:
+                    if url in self.visited_urls or len(self.visited_urls) >= max_pages:
+                        return None
+                    if self._should_skip_url(url):
+                        return None
+                    self.visited_urls.add(url)
+                    current_count = len(self.visited_urls)
+
                 try:
-                    response = await page.goto(url, timeout=self.settings.crawler_timeout, wait_until="domcontentloaded")
-                    
-                    # Check if page loaded successfully
-                    if not response or response.status >= 400:
-                        logger.warning(f"⚠️  Page returned status {response.status if response else 'unknown'}")
-                        continue
-                    
-                    # Wait for dynamic content
-                    await asyncio.sleep(1.5)
-                    await self._scroll_page(page)
-                    
-                    content = await page.content()
-                    soup = BeautifulSoup(content, 'lxml')
-                    
-                    # Enhanced page classification
-                    page_type = await self._enhanced_classify_page(page, soup, url)
-                    
-                    if page_type == PageType.PRODUCT:
-                        logger.info(f"✨ Found product page: {url}")
-                        product_data = await self._extract_product_data(page, content, url)
-                        
-                        # Validate it's actually a product
-                        if self._validate_product_data(product_data):
-                            products.append(product_data)
-                            self._learn_url_pattern(url)
+                    logger.info(f"🔍 [{current_count}/{max_pages}] Crawling: {url} (priority: {priority}, type: {expected_type.value})")
+
+                    page = await browser.new_page(user_agent=self.settings.crawler_user_agent)
+
+                    try:
+                        response = await page.goto(url, timeout=self.settings.crawler_timeout, wait_until="domcontentloaded")
+
+                        # Check if page loaded successfully
+                        if not response or response.status >= 400:
+                            logger.warning(f"⚠️  Page returned status {response.status if response else 'unknown'}")
+                            return None
+
+                        # Wait for dynamic content
+                        await asyncio.sleep(1.5)
+                        await self._scroll_page(page)
+
+                        content = await page.content()
+                        soup = BeautifulSoup(content, 'lxml')
+
+                        # Enhanced page classification
+                        page_type = await self._enhanced_classify_page(page, soup, url)
+
+                        result = {
+                            'url': url,
+                            'page_type': page_type,
+                            'product_data': None,
+                            'product_links': [],
+                            'next_pages': [],
+                            'other_links': []
+                        }
+
+                        if page_type == PageType.PRODUCT:
+                            logger.info(f"✨ Found product page: {url}")
+                            product_data = await self._extract_product_data(page, content, url)
+
+                            # Validate it's actually a product
+                            if self._validate_product_data(product_data):
+                                result['product_data'] = product_data
+                                self._learn_url_pattern(url)
+                            else:
+                                logger.warning(f"⚠️  Page classified as product but validation failed: {url}")
+                                result['page_type'] = PageType.OTHER
+
+                        if page_type in [PageType.CATEGORY, PageType.LISTING]:
+                            logger.info(f"📁 Found {page_type.value} page: {url}")
+
+                            # Multiple strategies to extract product links
+                            product_links = await self._extract_product_links_multi_strategy(page, soup, url, domain)
+                            result['product_links'] = product_links
+
+                            # Handle pagination
+                            next_pages = await self._find_pagination_multi_strategy(page, soup, url, domain)
+                            result['next_pages'] = next_pages
+
                         else:
-                            logger.warning(f"⚠️  Page classified as product but validation failed: {url}")
-                            page_type = PageType.OTHER
-                        
-                    if page_type in [PageType.CATEGORY, PageType.LISTING]:
-                        logger.info(f"📁 Found {page_type.value} page: {url}")
-                        
-                        # Multiple strategies to extract product links
-                        product_links = await self._extract_product_links_multi_strategy(page, soup, url, domain)
-                        
-                        # Add with high priority
-                        for link in product_links:
-                            if link not in self.visited_urls and link not in [item[1] for item in priority_queue]:
-                                priority_queue.insert(0, (95, link, PageType.PRODUCT))
-                        
-                        # Handle pagination
-                        next_pages = await self._find_pagination_multi_strategy(page, soup, url, domain)
-                        for next_url in next_pages:
-                            if next_url not in self.visited_urls:
-                                priority_queue.insert(len(product_links), (85, next_url, page_type))
-                    
-                    else:
-                        # Extract promising links
-                        links = await self._extract_promising_links(page, soup, url, domain)
-                        for link, link_priority in links[:20]:  # Limit to top 20
-                            if link not in self.visited_urls:
-                                priority_queue.append((link_priority, link, PageType.OTHER))
-                    
+                            # Extract promising links
+                            links = await self._extract_promising_links(page, soup, url, domain)
+                            result['other_links'] = links[:20]  # Limit to top 20
+
+                        return result
+
+                    finally:
+                        await page.close()
+
+                except Exception as e:
+                    logger.error(f"❌ Error crawling {url}: {str(e)}")
+                    return None
+
+        # Process URLs in batches
+        while priority_queue and len(self.visited_urls) < max_pages:
+            # Get next batch of URLs to process
+            batch_size = min(self.max_concurrent_pages * 2, len(priority_queue), max_pages - len(self.visited_urls))
+
+            if batch_size <= 0:
+                break
+
+            # Extract batch from queue
+            batch = []
+            for _ in range(batch_size):
+                if priority_queue:
+                    batch.append(priority_queue.pop(0))
+
+            # Create tasks for concurrent execution
+            tasks = [crawl_url(priority, url, expected_type) for priority, url, expected_type in batch]
+
+            # Wait for all tasks in batch to complete
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results and update queue
+            for result in results:
+                if result is None or isinstance(result, Exception):
+                    continue
+
+                # Add product if found
+                if result['product_data']:
+                    async with self.lock:
+                        products.append(result['product_data'])
+
+                # Add discovered links to queue
+                async with self.lock:
+                    # Add product links with high priority
+                    for link in result['product_links']:
+                        if link not in self.visited_urls and link not in [item[1] for item in priority_queue]:
+                            priority_queue.insert(0, (95, link, PageType.PRODUCT))
+
+                    # Add pagination links
+                    for next_url in result['next_pages']:
+                        if next_url not in self.visited_urls and next_url not in [item[1] for item in priority_queue]:
+                            priority_queue.insert(len(result['product_links']), (85, next_url, result['page_type']))
+
+                    # Add other promising links
+                    for link, link_priority in result['other_links']:
+                        if link not in self.visited_urls and link not in [item[1] for item in priority_queue]:
+                            priority_queue.append((link_priority, link, PageType.OTHER))
+
                     # Re-sort queue by priority
                     priority_queue.sort(key=lambda x: -x[0])
-                    
-                finally:
-                    await page.close()
-                    
-            except Exception as e:
-                logger.error(f"❌ Error crawling {url}: {str(e)}")
-                continue
-        
+
         return products
 
     def _initialize_enhanced_priority_queue(self, base_url: str) -> List[tuple]:
@@ -461,7 +524,7 @@ Respond in JSON format:
         
         # Signal 1: URL patterns (learned + common)
         url_lower = url.lower()
-        product_url_keywords = ['/product/', '/item/', '/p/', '/jewel/', '/jewelry-'] + \
+        product_url_keywords = ['/item/', '/p/', '/jewel/', '/jewelry-'] + \
                                [p.lower() for p in self.site_patterns.product_url_patterns]
         category_url_keywords = ['/category/', '/collection/', '/products', '/shop', '/catalog']
         
@@ -531,6 +594,8 @@ Respond in JSON format:
         logger.debug(f"Classification scores - Product: {product_score}, Category: {category_score}, URL: {url}")
         
         # Decision
+        if "/product" in url_lower:
+            return PageType.PRODUCT
         if product_score >= 40:
             return PageType.PRODUCT
         elif category_score >= 30:
@@ -831,7 +896,7 @@ Respond in JSON format:
             '/cdn-cgi/', '/api/', '/ajax/', '/.well-known/',
             '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.css', '.js', '.ico',
             '/cart', '/checkout', '/account', '/login', '/register',
-            '/password', '/logout', '/wishlist'
+            '/password', '/logout', '/wishlist', '/blog','/news',
         ]
         
         return any(pattern in url_lower for pattern in skip_patterns)
@@ -847,14 +912,14 @@ Respond in JSON format:
         
         # Positive indicators
         product_indicators = [
-            '/product/', '/item/', '/p/', '/jewel/', '/jewelry-', '/jewellery-',
-            '/ring/', '/necklace/', '/earring/', '/bracelet/', '/pendant/',
-            '/chain/', '/charm/', '/bangle/', '/anklet/'
+            '/product', '/item', '/p/', '/jewel', '/jewelry-', '/jewellery',
+            '/ring', '/necklace', '/earring', '/bracelet', '/pendant',
+            '/chain', '/charm', '/bangle', '/anklet'
         ]
         
         # Negative indicators (pages that look like products but aren't)
         non_product = [
-            '/blog/', '/about', '/contact', '/cart', '/checkout',
+            '/blog', '/about', '/contact', '/cart', '/checkout','/news',
             '/account', '/login', '/register', '/search', '/help', '/faq',
             '/privacy', '/terms', '/shipping', '/returns', '/category/',
             '/collection/', '/collections/', '/products/', '/shop/',
@@ -862,20 +927,43 @@ Respond in JSON format:
         ]
         
         has_product_indicator = any(ind in url_lower for ind in product_indicators)
-        has_non_product = any(ind in url_lower for ind in non_product)
         
         # If has clear product indicator and no exclusions
-        if has_product_indicator and not has_non_product:
+        if has_product_indicator:
             return True
         
-        # If URL has reasonable depth without exclusions (might be a product)
-        if not has_non_product:
-            depth = len(urlparse(url).path.strip('/').split('/'))
-            # Products typically have 1-3 path segments
-            if 1 <= depth <= 3:
-                return True
-        
         return False
+    
+    def _looks_like_product_url_sitemap(self, url: str) -> bool:
+            """Enhanced product URL detection"""
+            url_lower = url.lower()
+            
+            # Check learned patterns first
+            for pattern in self.site_patterns.product_url_patterns:
+                if pattern.lower() in url_lower:
+                    return True
+            
+            # Positive indicators
+            product_indicators = [
+                '/product'
+            ]
+            
+            # Negative indicators (pages that look like products but aren't)
+            non_product = [
+                '/blog', '/about', '/contact', '/cart', '/checkout','/news',
+                '/account', '/login', '/register', '/search', '/help', '/faq',
+                '/privacy', '/terms', '/shipping', '/returns', '/category/',
+                '/collection/', '/collections/', '/products/', '/shop/',
+                '.pdf', '.jpg', '.png', '.css', '.js', '/reviews/'
+            ]
+            
+            has_product_indicator = any(ind in url_lower for ind in product_indicators)
+            
+            # If has clear product indicator and no exclusions
+            if has_product_indicator:
+                return True
+            
+            return False
 
     def _learn_url_pattern(self, url: str) -> None:
         """Learn URL patterns from confirmed product pages"""
@@ -906,7 +994,7 @@ Respond in JSON format:
         
         # Must have at least 2 of these indicators
         indicators_found = 0
-        if 'price' in html_lower or '$' in html_lower or '€' in html_lower:
+        if 'price' in html_lower or '$' in html_lower or '€' in html_lower or '₹' in html_lower or 'rs' in html_lower :
             indicators_found += 1
         if 'add to cart' in html_lower or 'add to bag' in html_lower or 'buy now' in html_lower:
             indicators_found += 1
@@ -915,7 +1003,7 @@ Respond in JSON format:
         if len(product_data.get('images', [])) > 0:
             indicators_found += 1
         
-        return indicators_found >= 2
+        return indicators_found >= 1
 
     def _is_same_domain(self, url: str, domain: str) -> bool:
         """Check if URL is from same domain"""
