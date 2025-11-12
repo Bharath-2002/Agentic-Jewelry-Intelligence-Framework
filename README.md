@@ -257,15 +257,41 @@ IMAGE_STORAGE_PATH=./data/images
 MAX_IMAGES_PER_PRODUCT=5
 
 # Crawler
-CRAWLER_MAX_PAGES=50
+CRAWLER_MAX_PAGES=50          # Maximum pages to crawl (set to 0 for unlimited)
 CRAWLER_TIMEOUT=30000
 CRAWLER_HEADLESS=true
 
 # AI
-AI_MODEL=gpt-4-vision-preview
+AI_MODEL=gpt-4o
 AI_MAX_TOKENS=500
 AI_TEMPERATURE=0.3
+
+# Cost Control (for testing/development)
+MAX_PRODUCTS_TO_PROCESS=10    # Limit products to process (set to 0 for unlimited)
+
+# Email Notifications
+EMAIL_ENABLED=true
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_HOST_USER=your-email@gmail.com
+EMAIL_HOST_PASSWORD=your-app-password
+EMAIL_TO=recipient@example.com
 ```
+
+### Testing Configuration
+
+For development and testing, the following limits are enforced to reduce costs:
+
+- **`CRAWLER_MAX_PAGES`**: Limits the number of pages crawled (default: 100)
+- **`MAX_PRODUCTS_TO_PROCESS`**: Limits the number of products processed by AI (default: 10)
+
+**For production**, set these values to `0` to process all discovered products:
+```bash
+CRAWLER_MAX_PAGES=0
+MAX_PRODUCTS_TO_PROCESS=0
+```
+
+This prevents excessive OpenAI API costs during development while still allowing comprehensive scraping in production.
 
 ## Normalization Rules
 
@@ -383,11 +409,35 @@ poetry run playwright install-deps
 - **Crawler**: Respects `CRAWLER_MAX_PAGES` limit
 - **Rate Limiting**: Add delays between requests for production
 - **Image Storage**: Local filesystem (dev) or S3 (production)
-- **Concurrency**: Async throughout, uses background tasks
+- **Concurrency**: Async throughout, uses FastAPI background tasks
+- **Task Processing**: Currently uses FastAPI `BackgroundTasks` for job processing. For production at scale, consider migrating to Celery with Redis for distributed task queuing and better monitoring
+
+## Current Implementation Notes
+
+### Testing Limits (Development)
+- **Maximum crawl pages**: Configurable via `CRAWLER_MAX_PAGES` (default: 100 pages)
+- **Maximum products to process**: Configurable via `MAX_PRODUCTS_TO_PROCESS` (default: 10 products)
+- These limits help control OpenAI API costs during testing
+- Set both to `0` in production for unlimited processing
+
+### Task Processing
+- Currently uses FastAPI `BackgroundTasks` for asynchronous job execution
+- Suitable for single-instance deployments and development
+- **Recommended upgrade for production**: Celery with Redis for distributed processing, job queuing, and comprehensive monitoring
+
+### Known Areas for Improvement
+1. **Crawler Intelligence**: URL categorization is currently rule-based. Adding LLM-based URL classification would significantly improve crawl efficiency by better distinguishing product pages from category/navigation pages
+2. **Extractor Precision**: The extractor uses heuristic-based HTML parsing. Enhancements with schema.org support, better CSS selectors, and ML-based extraction would improve data quality across different website structures
+3. **Scalability**: Current implementation is optimized for moderate workloads. For high-volume production use, migrate to Celery for distributed task processing
 
 ## Future Enhancements
 
-- [ ] Celery worker integration for distributed processing
+### High Priority
+- [ ] **Celery + Redis Integration**: Migrate from FastAPI `BackgroundTasks` to Celery for production-grade distributed task processing, better monitoring, and retry mechanisms
+- [ ] **LLM-Powered URL Categorization**: Enhance crawler agent with LLM to intelligently categorize and prioritize URLs (product pages vs category pages vs non-relevant pages), improving crawl efficiency
+- [ ] **Advanced Extractor**: Improve extractor agent with more precise selectors, schema.org parsing, and ML-based extraction for better data quality across diverse website structures
+
+### Additional Improvements
 - [ ] S3 storage for images
 - [ ] Image perceptual hashing for deduplication
 - [ ] Fine-tuned CLIP model for offline inference
